@@ -4,7 +4,7 @@ description: >
   Open Notebook plugin meta-skill. Provides tool map, user journeys,
   first-time setup guidance, and cross-tool orchestration for the
   Open Notebook personal knowledge management plugin.
-version: 1.0.0
+version: 1.1.0
 tags: ["open-notebook", "plugin", "knowledge", "management", "orchestration"]
 triggers:
   - open notebook
@@ -27,7 +27,7 @@ Use when the user mentions Open Notebook, knowledge base, notebooks, sources, or
 | Tool | Purpose | Key Methods |
 |------|---------|-------------|
 | `opennotebook_browse` | Explore notebooks | `notebooks`, `notebook`, `tree` |
-| `opennotebook_manage` | Connection status & config | `status`, `config` |
+| `opennotebook_manage` | Connection, config, and notebook creation | `status`, `config`, `create` |
 | `opennotebook_sources` | Manage content sources | `list`, `add`, `read`, `delete` |
 | `opennotebook_notes` | Manage notes | `list`, `create`, `read`, `update`, `delete` |
 | `opennotebook_query` | Name-based lookup | `find` |
@@ -36,8 +36,8 @@ Use when the user mentions Open Notebook, knowledge base, notebooks, sources, or
 ## User Journey Maps
 
 ### Explore Knowledge Base
-1. `opennotebook_browse:notebooks` → see all notebooks
-2. `opennotebook_browse:notebook` → inspect a specific notebook by ID, or by name when name-based lookup is supported
+1. `opennotebook_browse:notebooks` → see all notebooks (includes short ID column)
+2. `opennotebook_browse:notebook` → inspect a specific notebook by full ID, or by name (case-insensitive, emoji-stripped)
 3. `opennotebook_sources:list` → see sources in that notebook
 4. `opennotebook_query:find` → look up specific items by name within a resolved notebook
 
@@ -47,12 +47,19 @@ Use when the user mentions Open Notebook, knowledge base, notebooks, sources, or
 3. `opennotebook_query:find` → locate specific items by name
 4. `opennotebook_notes:create` → save findings as a note
 
-### Add Content
+### Add Content (Updated Workflow)
 1. If the user names a notebook, use that notebook first; otherwise use `opennotebook_browse:notebooks` to pick a notebook by name or ID
-2. `opennotebook_sources:add` → add URL, file, or text
-3. If the tool requests confirmation, retry using the exact confirmation format it asks for; both boolean-like and string-like confirmation values may appear across tool versions
-4. Wait for processing (check with `opennotebook_sources:list`)
-5. `opennotebook_sources:list` → verify content was added
+2. `opennotebook_sources:add` → add content. The tool supports parameter aliases:
+   - Use `notebook` OR `notebook_id`
+   - Use `url` OR `content` (for URLs)
+   - Use `source` OR `source_id` (for lookups)
+3. **Auto-Detection**: The tool automatically detects content type:
+   - URLs starting with `http://` or `https://` → `link`
+   - File paths with known extensions → `text` (file upload)
+   - Everything else → `text`
+4. **Confirmation Gate**: If enabled, the tool shows the detected type and preview. Retry using the exact confirmation format requested (handle both boolean and string confirmations).
+5. **Async Processing**: Content is added immediately. Insight generation happens asynchronously (non-blocking), so you don't need to wait 3-4 minutes anymore.
+6. `opennotebook_sources:list` → verify content was added
 
 ### Create a Podcast
 1. Use the **open-notebook-podcast** skill for the full async workflow
@@ -65,13 +72,29 @@ Use when the user mentions Open Notebook, knowledge base, notebooks, sources, or
 
 1. `opennotebook_manage:status` → verify connection to port 5055
 2. `opennotebook_browse:notebooks` → see existing notebooks
-3. If empty → guide user to create a notebook and add sources
+3. If empty → use `opennotebook_manage:create` to create your first notebook
+4. `opennotebook_sources:add` → add content to your new notebook
 
 ## Workflow Notes
 
-- Prefer the notebook explicitly requested by the user over any default notebook.
-- Notebook names and notebook IDs may both be accepted by browse and source tools when resolution is available.
-- Add-source confirmation flows should not crash if the tool receives either a boolean-like or string-like confirmation value.
+- **Parameter Aliases**: The `sources` tool accepts `notebook` (alias for `notebook_id`), `url` (alias for `content`), and `source` (alias for `source_id`).
+- **Name Resolution**:
+  - `browse` and `sources` tools support name-based lookup (case-insensitive, emoji-stripped).
+  - `sources` tool supports short ID suffix matching (e.g., `abc12345` for `notebook:xyzabc12345`).
+  - `browse` tool currently requires full ID or name match; use `browse:notebooks` to get the full short ID if needed.
+- **Prefer** the notebook explicitly requested by the user over any default notebook.
+- **Add-source confirmation flows** should not crash if the tool receives either a boolean-like or string-like confirmation value.
+- **Insights** are now generated asynchronously; do not wait for them before proceeding.
+- **create_if_missing**: When adding sources, you can use `create_if_missing: true` to automatically create a notebook if it doesn't exist. This follows safety patterns (respects read-only mode and confirmation gates).
+
+## Error Guidance
+
+| Error Scenario | Possible Cause | Resolution |
+|----------------|----------------|------------|
+| "Notebook not found" | Typo in name, or using short ID in browse, or notebook doesn't exist | Check spelling (case-insensitive), ensure emojis are stripped, or use the full ID from `browse:notebooks` table. If the notebook doesn't exist, use `opennotebook_manage:create` to create it, or use `create_if_missing: true` when adding sources to auto-create. |
+| "Source add failed" | Invalid URL path, file not found, or API error | Verify the URL is reachable. For files, ensure the path is correct. Check `opennotebook_manage:status` for backend health. |
+| "Confirmation required" | Read-only mode or confirmation gate enabled | Retry with `confirmed: true` or `confirmed: "yes"` as requested by the tool. Check `opennotebook_manage:config` if this is unexpected. |
+| "Name resolution failed" | Multiple notebooks with similar names | Use the unique notebook ID instead of the name to disambiguate. |
 
 ## Plugin Configuration
 

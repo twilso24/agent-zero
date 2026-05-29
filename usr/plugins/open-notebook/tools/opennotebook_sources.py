@@ -116,18 +116,50 @@ class OpenNotebookSources(Tool):
                     from shared import resolve_notebook_id
                     notebook_id = await resolve_notebook_id(self.agent, notebook_id)
                 except ValueError as e:
-                    return Response(message=f"❌ **{e}**", break_loop=False)
+                    return Response(
+                        message=(
+                            f"❌ **{e}**\n"
+                            "💡 **Hint:** If this notebook doesn't exist, you can create it using "
+                            "`opennotebook_manage:create` with a `title` parameter."
+                        ),
+                        break_loop=False
+                    )
             return await self._list(notebook_id)
         elif method == "add":
             # Add a new source — auto-detects type from content (URL, file, text)
             notebook_id = kwargs.get("notebook_id", "") or kwargs.get("notebook", "")
+            create_if_missing = str(kwargs.get("create_if_missing", "false")).lower() == "true"
             if notebook_id:
                 try:
                     sys.modules.pop('shared', None)
                     from shared import resolve_notebook_id
                     notebook_id = await resolve_notebook_id(self.agent, notebook_id)
                 except ValueError as e:
-                    return Response(message=f"❌ **{e}**", break_loop=False)
+                    if create_if_missing:
+                        # Auto-create notebook if not found and create_if_missing is true
+                        creation_result = await self._create_notebook_if_missing(notebook_id, kwargs)
+                        # If the helper returned a Response (confirmation/error), return it immediately
+                        if isinstance(creation_result, Response):
+                            return creation_result
+                        # Otherwise, creation_result should be the new notebook ID
+                        notebook_id = creation_result
+                        if not notebook_id:
+                            # Creation failed or was cancelled, return early
+                            return Response(
+                                message="Notebook creation failed or was cancelled. Please try again.",
+                                break_loop=False
+                            )
+                    else:
+                        # Original error message when create_if_missing is false
+                        return Response(
+                            message=(
+                                f"❌ **{e}**\n"
+                                "💡 **Hint:** If this notebook doesn't exist, you can create it using "
+                                "`opennotebook_manage:create` with a `title` parameter, or use "
+                                "`create_if_missing: true` to auto-create it."
+                            ),
+                            break_loop=False
+                        )
             content = kwargs.get("content", "") or kwargs.get("url", "")
             title = kwargs.get("title", "")
             confirmed = str(kwargs.get("confirmed", "false")).lower() == "true"
@@ -681,3 +713,60 @@ class OpenNotebookSources(Tool):
             # Never fail the add operation — just note the insight failure
             error_msg = str(e)[:200]
             return f"⚠️ **Insight generation failed:** {error_msg}"
+
+    async def _create_notebook_if_missing(self, notebook_name: str, **kwargs):
+        """Create a notebook if it doesn't exist, following safety patterns.
+
+        Args:
+            notebook_name: Name/ID for the notebook to create.
+            **kwargs: Original kwargs to extract confirmation flags.
+
+        Returns:
+            Union[Response, str]: Response for confirmation/error, or str notebook ID on success.
+        """
+        # Safety Check 1: Read-Only Mode
+        if config.is_read_only(self.agent):
+            return Response(
+                message=(
+                    "⚠️ **Plugin is in read-only mode.** Cannot auto-create notebooks.\n"
+                    "Use `opennotebook_config:settings` to check or change read-only mode."
+                ),
+                break_loop=False
+            )
+
+        # Extract confirmation flag from kwargs
+        confirmed = str(kwargs.get("confirmed", "false")).lower() == "true"
+
+        # Safety Check 2: Confirmation Gate
+        if config.needs_confirmation(self.agent) and not confirmed:
+            return Response(
+                message=(
+                    f"⚠️ **Confirm auto-creating notebook**\n"
+                    f"\n| Detail | Value |"
+                    f"\n|--------|-------|"
+                    f"\n| Name | `{notebook_name}` |"
+                    f"\n| Description | Auto-created by source-add workflow |"
+                    f"\n\nTo confirm, call again with `confirmed: true`."
+                ),
+                break_loop=False
+            )
+
+        # Create notebook via API call
+        api_url = config.get_api_url(self.agent)
+        url = f"{api_url}/api/notebooks"
+
+        try:
+            http_client = await client.get_client()
+            response = await http_client.post(url, json={
+                "name": notebook_name,
+                "description": "Auto-created by source-add workflow"
+            })
+            response.raise_for_status()
+            data = response.json()
+            notebook_id = data.get("id", "unknown")
+            return notebook_id
+        except Exception as e:
+            return Response(
+                message=f"❌ **Failed to create notebook:** {str(e)}",
+                break_loop=False
+            )
